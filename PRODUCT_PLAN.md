@@ -31,6 +31,8 @@ Team leads and managers may later benefit from a shared view, but designing for 
 
 ## Product principles
 
+Tangled Mess is a companion to coding harnesses: it tracks objectives, sessions, blockers, and source records across tools. Implementation, agent prompting, review submission, merging, and ticket editing stay in their existing tools. The sidebar must list every linked ticket and PR/MR for the selected Workstream, including provider, identifier, state, and a source URL when available. Several tickets and PRs/MRs may contribute to one Workstream; one source record may be relevant to several Workstreams. Never invent a destination when a source URL is missing.
+
 - **Workstreams, not feeds.** Events matter only insofar as they explain progress toward an objective.
 - **Evidence before assertion.** Every generated claim should link back to the ticket, diff, review, build, or agent message that supports it.
 - **Attention is separate from workflow status.** A ticket can be “in progress” while the developer is waiting, blocked, or intentionally paused.

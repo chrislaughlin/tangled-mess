@@ -8,6 +8,15 @@ Tangled Mess helps a developer reconstruct and manage the state of concurrent wo
 A developer objective and the related records, activity, dependencies, and decisions that together describe its progress.
 _Avoid_: Project, task, thread
 
+**Agent Session**:
+A conversation or execution run in a coding tool that contributes evidence to a Workstream. Several sessions may contribute to the same objective in the same or different repositories.
+
+**Repository**:
+A source-code repository associated with work; it is independent of a tool's project grouping and may participate in several Workstreams.
+
+**Tool Project**:
+A named grouping or workspace inside Codex, Claude, Cursor, or another tool. It may reference zero, one, or several repositories and is not itself a Workstream.
+
 **Source Record**:
 An item imported from another system, such as a ticket, pull request, branch, review, build, or agent session.
 _Avoid_: Item, object, integration data
