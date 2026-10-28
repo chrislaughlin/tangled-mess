@@ -21,15 +21,19 @@ function matchesHarness(session){const tool=toolProjects[session.project]?.tool|
 const setupScript=document.createElement('script');setupScript.src='setup.js';document.head.append(setupScript);
 const viewport=document.createElement('div');viewport.className='map-viewport';$('map').before(viewport);viewport.append($('map'));
 const tools=document.createElement('div');tools.className='map-tools';
-let mapZoom=1;
+let mapZoom=1,panX=0,panY=0,camera={x:0,y:0,scale:1};
+function paintCamera(){$('map').style.transform=`translate(${camera.x+panX}px,${camera.y+panY}px) scale(${camera.scale})`;}
+function resetCamera(){mapZoom=1;panX=0;panY=0;}
+$('reset').addEventListener('click',resetCamera);
 const zoomControls=document.createElement('div');zoomControls.className='zoom-controls';
 const zoomOut=document.createElement('button');zoomOut.textContent='−';zoomOut.setAttribute('aria-label','Zoom out');
 const zoomReset=document.createElement('button');zoomReset.textContent='100%';zoomReset.setAttribute('aria-label','Reset map zoom');zoomReset.title='Reset zoom to fit';
 const zoomIn=document.createElement('button');zoomIn.textContent='+';zoomIn.setAttribute('aria-label','Zoom in');
-function changeZoom(value){mapZoom=Math.min(4,Math.max(.25,value));fitMap();}
-zoomOut.onclick=()=>changeZoom(mapZoom/1.2);zoomIn.onclick=()=>changeZoom(mapZoom*1.2);zoomReset.onclick=()=>changeZoom(1);zoomControls.append(zoomOut,zoomReset,zoomIn);tools.append(zoomControls);
-viewport.addEventListener('wheel',event=>{if(event.ctrlKey||event.metaKey){event.preventDefault();changeZoom(mapZoom*Math.exp(-event.deltaY*.005));}},{passive:false});
-for(const [label,action] of [['Fit selection',()=>{mapZoom=1;expanded=selected;view='map';render();fitMap();}],['Fit overview',()=>{mapZoom=1;expanded=null;view='map';render();fitMap();}]]){const button=document.createElement('button');button.textContent=label;button.onclick=action;tools.append(button);}document.querySelector('.canvas-heading').append(tools);
+function changeZoom(value,anchor={x:viewport.clientWidth/2,y:viewport.clientHeight/2}){const worldX=(anchor.x-camera.x-panX)/camera.scale,worldY=(anchor.y-camera.y-panY)/camera.scale;mapZoom=Math.min(6,Math.max(.25,value));fitMap();panX=anchor.x-camera.x-worldX*camera.scale;panY=anchor.y-camera.y-worldY*camera.scale;paintCamera();}
+zoomOut.onclick=()=>changeZoom(mapZoom/1.2);zoomIn.onclick=()=>changeZoom(mapZoom*1.2);zoomReset.onclick=()=>{resetCamera();fitMap();};zoomControls.append(zoomOut,zoomReset,zoomIn);tools.append(zoomControls);
+viewport.addEventListener('wheel',event=>{event.preventDefault();const units=event.deltaMode===1?16:event.deltaMode===2?viewport.clientHeight:1;if(event.ctrlKey||event.metaKey){const bounds=viewport.getBoundingClientRect();changeZoom(mapZoom*Math.exp(-event.deltaY*units*.005),{x:event.clientX-bounds.left,y:event.clientY-bounds.top});}else{panX-=event.deltaX*units;panY-=event.deltaY*units;paintCamera();}},{passive:false});
+viewport.addEventListener('pointerdown',event=>{if(event.button!==0||event.target.closest('button'))return;event.preventDefault();viewport.setPointerCapture(event.pointerId);viewport.classList.add('panning');let x=event.clientX,y=event.clientY;const move=e=>{panX+=e.clientX-x;panY+=e.clientY-y;x=e.clientX;y=e.clientY;paintCamera();};const stop=()=>{viewport.classList.remove('panning');viewport.removeEventListener('pointermove',move);viewport.removeEventListener('pointerup',stop);viewport.removeEventListener('pointercancel',stop);viewport.removeEventListener('lostpointercapture',stop);};viewport.addEventListener('pointermove',move);viewport.addEventListener('pointerup',stop);viewport.addEventListener('pointercancel',stop);viewport.addEventListener('lostpointercapture',stop);});
+for(const [label,action] of [['Fit selection',()=>{resetCamera();expanded=selected;view='map';render();fitMap();}],['Fit overview',()=>{resetCamera();expanded=null;view='map';render();fitMap();}]]){const button=document.createElement('button');button.textContent=label;button.onclick=action;tools.append(button);}document.querySelector('.canvas-heading').append(tools);
 function fitMap(){
  if(view!=='map')return;
  const map=$('map');map.style.transform='none';
@@ -62,13 +66,13 @@ function fitMap(){
  const scale=Math.max(.1,Math.min(1,(viewport.clientWidth-24)/(right-left),(viewport.clientHeight-24)/(bottom-top)))*mapZoom;
  const x=Math.max(12,(viewport.clientWidth-(right-left)*scale)/2)-left*scale;
  const y=Math.max(12,(viewport.clientHeight-(bottom-top)*scale)/2)-top*scale;
- map.style.transform='translate('+x+'px,'+y+'px) scale('+scale+')';
- viewport.style.overflow=mapZoom>1?'auto':'hidden';if(mapZoom<=1){viewport.scrollTop=0;viewport.scrollLeft=0;}
- zoomReset.textContent=Math.round(mapZoom*100)+'%';zoomOut.disabled=mapZoom<=.25;zoomIn.disabled=mapZoom>=4;
+ camera={x,y,scale};paintCamera();
+ viewport.style.overflow='hidden';
+ zoomReset.textContent=Math.round(mapZoom*100)+'%';zoomOut.disabled=mapZoom<=.25;zoomIn.disabled=mapZoom>=6;
 }
 new ResizeObserver(fitMap).observe(viewport);
-function choose(id){mapZoom=1;expanded=expanded===id?null:id;selected=id;render();}
-function collapse(){mapZoom=1;expanded=null;render();[...$('nodes').children].find(n=>n.getAttribute('aria-pressed')==='true')?.focus();}
+function choose(id){resetCamera();expanded=expanded===id?null:id;selected=id;render();}
+function collapse(){resetCamera();expanded=null;render();[...$('nodes').children].find(n=>n.getAttribute('aria-pressed')==='true')?.focus();}
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&expanded)collapse();});
 function render(){
  const query=$('search').value.toLowerCase(),filter=$('filter').value;
