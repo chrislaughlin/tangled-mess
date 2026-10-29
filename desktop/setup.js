@@ -20,8 +20,9 @@ function escapeHTML(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&am
 let realSessions=[];
 let pendingReview=null;
 
-function folderKey(row){return row.cwd||row.source?.split('/agent-transcripts/')[0]||'Unassigned';}
-function plainTitle(value){return String(value||'').replace(/<[^>]+>/g,'');}
+const WM=()=>window.TangledWorkstreamMemory;
+function folderKey(row){return WM()?.folderKey(row)??(row.cwd||row.source?.split('/agent-transcripts/')[0]||'Unassigned');}
+function plainTitle(value){return WM()?.plainTitle(value)??String(value||'').replace(/<[^>]+>/g,'');}
 
 function placeWorkGrid(){
  const columns=Math.ceil(Math.sqrt(work.length||1));const rowCount=Math.ceil(work.length/columns);
@@ -48,44 +49,68 @@ function pushLocalSessions(workId,rows,repo,name){
 }
 
 function enrichWorkstream(w,rows){
- const analysis=window.TangledAttention?.analyzeWorkstream(rows)||{suggested:'Paused',why:'Imported · activity unknown',nextSteps:[],changesSince:()=>rows.slice(0,3).map(r=>[r.title,r.tool+' · '+r.updated])};
- w.suggestedAttention=analysis.suggested;
- if(!w.attentionOverride)w.state=analysis.suggested;
- w.attentionWhy=analysis.why;
- w.nextSteps=analysis.nextSteps;
- w.next=analysis.nextSteps[0]||w.next;
- w.changes=analysis.changesSince(w.lastFocusedAt);
- if(!w.brief||w.provisional)w.brief=analysis.why+' · '+rows.length+' local session'+(rows.length===1?'':'s')+' in this Workstream.';
+ const analysis=window.TangledAttention?.analyzeWorkstream(rows)||{suggested:'Paused',why:'Imported · activity unknown',nextSteps:[],changesSince:()=>rows.slice(0,3).map(r=>[r.title,(r.tool||'')+' · '+(r.updated||'')])};
+ const heuristic={
+  suggested:analysis.suggested,
+  why:w.absentFromScan?'No sessions in the current import window · curated membership retained':analysis.why,
+  nextSteps:analysis.nextSteps,
+  next:analysis.nextSteps?.[0],
+  changes:analysis.changesSince(w.lastFocusedAt),
+  sessionCount:rows.length,
+  brief:w.absentFromScan?'Curated Workstream retained. None of its sessions appear in the newest import window.':undefined
+ };
+ if(WM()?.enrichFields)WM().enrichFields(w,heuristic);
+ else{
+  w.suggestedAttention=heuristic.suggested;
+  if(!w.attentionOverride)w.state=heuristic.suggested;
+  w.attentionWhy=heuristic.why;
+  w.nextSteps=heuristic.nextSteps;
+  w.next=heuristic.next||w.next;
+  w.changes=heuristic.changes;
+  if(!w.brief||w.provisional)w.brief=heuristic.why+' · '+rows.length+' local session'+(rows.length===1?'':'s')+' in this Workstream.';
+ }
 }
 
 function buildFromMemory(result,memory){
- const byId=new Map(result.sessions.map(s=>[s.id,s]));
- const assigned=new Set();
+ const planned=WM()?.planImport(result.sessions,memory)||[];
  const created=[];
- for(const ws of memory.workstreams||[]){
-  const members=ws.sessionIds.map(id=>byId.get(id)).filter(Boolean);
-  if(!members.length)continue;
-  members.forEach(s=>assigned.add(s.id));
-  const id=ws.id||('ws-'+created.length);
+ for(const plan of planned){
+  const members=plan.presentSessions||[];
+  const id=plan.id;
   const repo='repo-'+id;
-  const name=plainTitle(ws.title)||(folderKey(members[0]).split('/').filter(Boolean).pop())||'Workstream';
-  repositories[repo]={name,path:ws.folderHints?.[0]||folderKey(members[0])};
-  const item={id,title:escapeHTML(name),project:ws.provisional?'Local folder group':'Curated workstream',state:ws.attentionState||'Paused',x:20,y:20,objective:ws.objective||'Confirmed shared objective across imported sessions.',brief:'',changes:[],next:ws.acceptedNextMove||'Inspect sessions and decide the next move.',sources:'Local files · curated',folderHints:ws.folderHints||[...new Set(members.map(folderKey))],provisional:!!ws.provisional,attentionOverride:!!ws.attentionOverride,lastFocusedAt:ws.lastFocusedAt||null,acceptedNextMove:ws.acceptedNextMove||null,attentionWhy:ws.attentionWhy||null,suggestedAttention:ws.suggestedAttention||null,local:true,snapshot:memory.snapshots?.[id]||null};
-  created.push(item);work.push(item);pushLocalSessions(id,members,repo,name);enrichWorkstream(item,members);
-  if(ws.attentionOverride&&ws.attentionState)item.state=ws.attentionState;
+  const name=plan.title||'Workstream';
+  repositories[repo]={name,path:(plan.folderHints&&plan.folderHints[0])||folderKey(members[0]||{})};
+  const item={
+   id,
+   title:escapeHTML(name),
+   project:plan.provisional?'Local folder group':'Curated workstream',
+   state:plan.attentionState||'Paused',
+   x:20,y:20,
+   objective:plan.objective||(plan.fromMemory?'Confirmed shared objective across imported sessions.':'Provisional folder grouping; confirm the shared objective.'),
+   brief:'',
+   changes:[],
+   next:plan.acceptedNextMove||'Inspect the imported sessions and confirm which belong to the same objective.',
+   sources:plan.fromMemory?'Local files · curated':'Local files · imported '+result.importedAt,
+   folderHints:plan.folderHints||[],
+   provisional:!!plan.provisional,
+   attentionOverride:!!plan.attentionOverride,
+   lastFocusedAt:plan.lastFocusedAt||null,
+   acceptedNextMove:plan.acceptedNextMove||null,
+   attentionWhy:plan.attentionWhy||null,
+   suggestedAttention:plan.suggestedAttention||null,
+   retainedSessionIds:plan.retainedSessionIds||members.map(m=>m.id),
+   absentFromScan:!!plan.absentFromScan,
+   local:true,
+   snapshot:plan.snapshot||memory.snapshots?.[id]||null
+  };
+  // Restore accepted Context Snapshot onto live fields before heuristic enrichment.
+  WM()?.applyAcceptedSnapshot(item,item.snapshot);
+  if(plan.attentionOverride&&plan.attentionState){item.state=plan.attentionState;item.attentionOverride=true;}
+  created.push(item);work.push(item);
+  if(members.length)pushLocalSessions(id,members,repo,name);
+  enrichWorkstream(item,members);
  }
- const leftovers=result.sessions.filter(s=>!assigned.has(s.id));
- const groups=new Map();
- for(const row of leftovers){const directory=folderKey(row);if(!groups.has(directory))groups.set(directory,[]);groups.get(directory).push(row);}
- for(const [directory,rows] of groups){
-  const id='local-'+directory.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(-56)||('unassigned-'+rows[0]?.id);
-  const repo='repo-'+id;
-  const name=directory.split('/').filter(Boolean).pop()||'Unassigned sessions';
-  repositories[repo]={name,path:directory};
-  const item={id,title:escapeHTML(name),project:'Local folder group',state:'Paused',x:20,y:20,objective:'Provisional folder grouping; confirm the shared objective.',brief:'',changes:[],next:'Inspect the imported sessions and confirm which belong to the same objective.',sources:'Local files · imported '+result.importedAt,folderHints:[directory],provisional:true,local:true};
-  work.push(item);created.push(item);pushLocalSessions(id,rows,repo,name);enrichWorkstream(item,rows);
- }
- return {created,leftoverFolders:[...groups.keys()]};
+ return {created,leftoverFolders:[...new Set(planned.filter(p=>!p.fromMemory).flatMap(p=>p.folderHints||[]))]};
 }
 
 function applyStoredLinks(memory){
@@ -121,7 +146,7 @@ function openReviewGroupings(result){
   const row=document.createElement('label');row.className='review-row';
   const box=document.createElement('input');box.type='checkbox';box.value=w.id;checks.push(box);
   const title=document.createElement('input');title.type='text';title.value=plainTitle(w.title);title.className='review-title';title.dataset.workId=w.id;
-  const meta=document.createElement('span');meta.className='source';meta.textContent=(w.provisional?'Provisional · ':'Curated · ')+sessions.filter(s=>s.work===w.id).length+' sessions'+(w.attentionWhy?' · '+w.attentionWhy.slice(0,70):'');
+  const meta=document.createElement('span');meta.className='source';meta.textContent=(w.provisional?'Provisional · ':'Curated · ')+(w.absentFromScan?'retained · not in current scan · ':'')+sessions.filter(s=>s.work===w.id).length+' sessions in window'+(w.attentionWhy?' · '+w.attentionWhy.slice(0,70):'');
   row.append(box,title,meta);list.append(row);
  }
  panel.append(list);

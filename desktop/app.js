@@ -19,19 +19,19 @@ function linkKey(l){const n=normalizeLink(l);return n.from+'→'+n.to;}
 function isLocalMode(){return typeof realSessions!=='undefined'&&realSessions.length>0;}
 async function persistMemory(){
  if(!window.tangled?.saveMemory||!isLocalMode())return;
- const payload={
+ const observation={
   version:1,
   workstreams:work.map(w=>({
    id:w.id,
    title:String(w.title||'').replace(/<[^>]+>/g,''),
    objective:w.objective||'',
-   sessionIds:sessions.filter(s=>s.work===w.id).map(s=>s.id),
+   sessionIds:[...new Set([...(w.retainedSessionIds||[]),...sessions.filter(s=>s.work===w.id).map(s=>s.id)])],
    folderHints:w.folderHints||[],
    provisional:!!w.provisional,
    attentionState:w.state,
    attentionOverride:!!w.attentionOverride,
    lastFocusedAt:w.lastFocusedAt||null,
-   acceptedNextMove:w.acceptedNextMove||w.next||null,
+   acceptedNextMove:w.acceptedNextMove||(w.acceptedGuidance?w.next:null)||null,
    attentionWhy:w.attentionWhy||null,
    suggestedAttention:w.suggestedAttention||null
   })),
@@ -41,6 +41,8 @@ async function persistMemory(){
   reviewedFolders:curatedMemory.reviewedFolders||[],
   lastImportSessionIds:(typeof realSessions!=='undefined'?realSessions:[]).map(s=>s.id)
  };
+ const merge=window.TangledWorkstreamMemory?.mergeDurableMemory;
+ const payload=merge?merge(curatedMemory,observation):observation;
  curatedMemory=await window.tangled.saveMemory(payload);
 }
 const harnessLabel=document.createElement('label');harnessLabel.className='label';harnessLabel.htmlFor='harness-filter';harnessLabel.textContent='Session harness';
@@ -142,10 +144,8 @@ function applySnapshotActions(w){
   const accept=document.createElement('button');accept.className='primary';accept.textContent='Accept';
   accept.onclick=()=>{
    snap.status='accepted';
-   w.brief=snap.standing;w.next=snap.next;w.acceptedNextMove=snap.next;
-   if(snap.attentionWhy)w.attentionWhy=snap.attentionWhy;
-   if(snap.attentionState&&!w.attentionOverride){w.state=snap.attentionState;w.suggestedAttention=snap.attentionState;}
-   if(snap.nextSteps?.length)w.nextSteps=snap.nextSteps;
+   if(window.TangledWorkstreamMemory?.applyAcceptedSnapshot)window.TangledWorkstreamMemory.applyAcceptedSnapshot(w,snap);
+   else{w.brief=snap.standing;w.next=snap.next;w.acceptedNextMove=snap.next;w.acceptedGuidance=true;if(snap.attentionWhy)w.attentionWhy=snap.attentionWhy;if(snap.attentionState&&!w.attentionOverride){w.state=snap.attentionState;w.suggestedAttention=snap.attentionState;}if(snap.nextSteps?.length)w.nextSteps=snap.nextSteps;}
    persistMemory();render();
   };
   const edit=document.createElement('button');edit.textContent='Edit';
@@ -155,11 +155,12 @@ function applySnapshotActions(w){
    const why=prompt('Edit attention why',snap.attentionWhy||'');if(why===null)return;
    snap.standing=standing;snap.next=next;snap.attentionWhy=why;snap.edited=true;
    snap.status='accepted';
-   w.brief=standing;w.next=next;w.acceptedNextMove=next;w.attentionWhy=why;
+   if(window.TangledWorkstreamMemory?.applyAcceptedSnapshot)window.TangledWorkstreamMemory.applyAcceptedSnapshot(w,snap);
+   else{w.brief=standing;w.next=next;w.acceptedNextMove=next;w.attentionWhy=why;w.acceptedGuidance=true;}
    persistMemory();render();
   };
   const discard=document.createElement('button');discard.textContent='Discard';
-  discard.onclick=()=>{snap.status='discarded';persistMemory();render();};
+  discard.onclick=()=>{snap.status='discarded';w.acceptedGuidance=false;persistMemory();render();};
   actions.append(accept,edit,discard);box.append(actions);
  }
  return box;
