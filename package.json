@@ -1,1 +1,1 @@
-{"name":"tangled-mess","version":"0.1.0","private":true,"description":"Tangled Mess desktop prototype","main":"desktop/main.cjs","scripts":{"start":"electron .","preview":"python3 -m http.server 4174"},"devDependencies":{"electron":"^42.0.0"}}
+{"name":"tangled-mess","version":"0.1.0","private":true,"description":"Tangled Mess desktop prototype","main":"desktop/main.cjs","scripts":{"start":"electron .","preview":"python3 -m http.server 4174","smoke:p0":"node desktop/smoke-p0.cjs"},"devDependencies":{"electron":"^42.0.0"}}

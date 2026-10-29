@@ -18,29 +18,338 @@ settingsButton.onclick=showSetup;document.getElementById('demo-mode').onclick=sh
 const report=document.getElementById('setup-result');
 function escapeHTML(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 let realSessions=[];
-function useLocalData(result){
- realSessions=result.sessions;work.splice(0);sessions.splice(0);sourceRecords.splice(0);links.splice(0);
- const groups=new Map();for(const row of result.sessions){const directory=row.cwd||row.source.split('/agent-transcripts/')[0];if(!groups.has(directory))groups.set(directory,[]);groups.get(directory).push(row);}
- let index=0;for(const [directory,rows] of groups){const id='local-'+index;const repo='repo-'+index;const project='project-'+index;const name=directory.split('/').filter(Boolean).pop()||'Unassigned sessions';repositories[repo]={name,path:directory};
- work.push({id,title:escapeHTML(name),project:'Local folder group',state:'Paused',x:20+(index%3)*30,y:15+Math.floor(index/3)*28,objective:'Provisional folder grouping; confirm the shared objective.',brief:'Imported '+rows.length+' local sessions. Current activity and completion are unknown. No tickets or dependency links have been inferred.',changes:rows.slice(0,3).map(r=>[escapeHTML(r.title),escapeHTML(r.tool+' · '+r.updated)]),next:'Inspect the imported sessions and confirm which belong to the same objective.',sources:'Local files · imported '+result.importedAt});
- for(const row of rows){const toolProject=project+'-'+row.tool;toolProjects[toolProject]={name,tool:row.tool,repos:[repo]};sessions.push({id:row.id,work:id,project:toolProject,repo,title:row.title,state:'Imported · activity unknown',branch:null,summary:row.excerpt||'Metadata only; no transcript excerpt imported.',next:'Return to '+row.tool+' to continue this session.'});}
- index++;}
- // Keep large imports in the queue; place all objectives within a bounded grid.
- const columns=Math.ceil(Math.sqrt(work.length||1));const rowCount=Math.ceil(work.length/columns);work.forEach((w,i)=>{w.x=(i%columns+.5)*100/columns;w.y=(Math.floor(i/columns)+.5)*100/rowCount;});
+let pendingReview=null;
+
+const WM=()=>window.TangledWorkstreamMemory;
+function folderKey(row){return WM()?.folderKey(row)??(row.cwd||row.source?.split('/agent-transcripts/')[0]||'Unassigned');}
+function plainTitle(value){return WM()?.plainTitle(value)??String(value||'').replace(/<[^>]+>/g,'');}
+
+function placeWorkGrid(){
+ const columns=Math.ceil(Math.sqrt(work.length||1));const rowCount=Math.ceil(work.length/columns);
+ work.forEach((w,i)=>{w.x=(i%columns+.5)*100/columns;w.y=(Math.floor(i/columns)+.5)*100/rowCount;});
+}
+
+function guessBranch(row){
+ if(row.branch)return row.branch;
+ const blob=String(row.excerpt||'')+'\n'+String(row.title||'');
+ const named=blob.match(/\b(?:branch|checkout)\s*[:=]\s*([A-Za-z0-9._\/-]+)/i);
+ if(named)return named[1];
+ const conventional=blob.match(/\b((?:feat|fix|chore|test|docs|refactor)\/[A-Za-z0-9._\/-]+)/);
+ return conventional?conventional[1]:null;
+}
+function pushLocalSessions(workId,rows,repo,name){
+ for(const row of rows){
+  const toolProject=workId+'-'+row.tool;
+  toolProjects[toolProject]={name,tool:row.tool,repos:[repo]};
+  const analysis=window.TangledAttention?.analyzeSession(row);
+  const state=analysis?.state==='Needs you'?'Needs input':(analysis?.state==='Waiting'?'Ready for review':'Imported · activity unknown');
+  const branch=guessBranch(row);
+  sessions.push({id:row.id,work:workId,project:toolProject,repo,title:row.title,state,branch,summary:row.excerpt||'Metadata only; no transcript excerpt imported.',next:analysis?.state==='Needs you'?'Answer the open question in this session.':'Return to '+row.tool+' to continue this session.',source:row.source,updated:row.updated,excerpt:row.excerpt,tool:row.tool,cwd:row.cwd});
+ }
+}
+
+function enrichWorkstream(w,rows){
+ const analysis=window.TangledAttention?.analyzeWorkstream(rows)||{suggested:'Paused',why:'Imported · activity unknown',nextSteps:[],changesSince:()=>rows.slice(0,3).map(r=>[r.title,(r.tool||'')+' · '+(r.updated||'')])};
+ const heuristic={
+  suggested:analysis.suggested,
+  why:w.absentFromScan?'No sessions in the current import window · curated membership retained':analysis.why,
+  nextSteps:analysis.nextSteps,
+  next:analysis.nextSteps?.[0],
+  changes:analysis.changesSince(w.lastFocusedAt),
+  sessionCount:rows.length,
+  brief:w.absentFromScan?'Curated Workstream retained. None of its sessions appear in the newest import window.':undefined
+ };
+ if(WM()?.enrichFields)WM().enrichFields(w,heuristic);
+ else{
+  w.suggestedAttention=heuristic.suggested;
+  if(!w.attentionOverride)w.state=heuristic.suggested;
+  w.attentionWhy=heuristic.why;
+  w.nextSteps=heuristic.nextSteps;
+  w.next=heuristic.next||w.next;
+  w.changes=heuristic.changes;
+  if(!w.brief||w.provisional)w.brief=heuristic.why+' · '+rows.length+' local session'+(rows.length===1?'':'s')+' in this Workstream.';
+ }
+}
+
+function buildFromMemory(result,memory){
+ const planned=WM()?.planImport(result.sessions,memory)||[];
+ const created=[];
+ for(const plan of planned){
+  const members=plan.presentSessions||[];
+  const id=plan.id;
+  const repo='repo-'+id;
+  const name=plan.title||'Workstream';
+  repositories[repo]={name,path:(plan.folderHints&&plan.folderHints[0])||folderKey(members[0]||{})};
+  const item={
+   id,
+   title:escapeHTML(name),
+   project:plan.provisional?'Local folder group':'Curated workstream',
+   state:plan.attentionState||'Paused',
+   x:20,y:20,
+   objective:plan.objective||(plan.fromMemory?'Confirmed shared objective across imported sessions.':'Provisional folder grouping; confirm the shared objective.'),
+   brief:'',
+   changes:[],
+   next:plan.acceptedNextMove||'Inspect the imported sessions and confirm which belong to the same objective.',
+   sources:plan.fromMemory?'Local files · curated':'Local files · imported '+result.importedAt,
+   folderHints:plan.folderHints||[],
+   provisional:!!plan.provisional,
+   attentionOverride:!!plan.attentionOverride,
+   lastFocusedAt:plan.lastFocusedAt||null,
+   acceptedNextMove:plan.acceptedNextMove||null,
+   attentionWhy:plan.attentionWhy||null,
+   suggestedAttention:plan.suggestedAttention||null,
+   retainedSessionIds:plan.retainedSessionIds||members.map(m=>m.id),
+   absentFromScan:!!plan.absentFromScan,
+   local:true,
+   snapshot:plan.snapshot||memory.snapshots?.[id]||null
+  };
+  // Restore accepted Context Snapshot onto live fields before heuristic enrichment.
+  WM()?.applyAcceptedSnapshot(item,item.snapshot);
+  if(plan.attentionOverride&&plan.attentionState){item.state=plan.attentionState;item.attentionOverride=true;}
+  created.push(item);work.push(item);
+  if(members.length)pushLocalSessions(id,members,repo,name);
+  enrichWorkstream(item,members);
+ }
+ return {created,leftoverFolders:[...new Set(planned.filter(p=>!p.fromMemory).flatMap(p=>p.folderHints||[]))]};
+}
+
+function applyStoredLinks(memory){
+ links.splice(0);
+ const dismissed=new Set(memory.dismissedLinks||[]);
+ for(const l of memory.links||[]){
+  const n=normalizeLink(l);
+  if(dismissed.has(linkKey(n)))continue;
+  if(work.some(w=>w.id===n.from)&&work.some(w=>w.id===n.to))links.push(n);
+ }
+}
+
+function shouldPromptReview(result,memory){
+ const known=new Set(memory.reviewedFolders||[]);
+ const folders=new Set(result.sessions.map(folderKey));
+ const fresh=[...folders].filter(f=>!known.has(f));
+ const hasProvisional=work.some(w=>w.provisional);
+ return hasProvisional&&(fresh.length>0||!(memory.workstreams||[]).length);
+}
+
+function openReviewGroupings(result){
+ pendingReview={result};
+ const overlay=document.createElement('div');overlay.className='handoff-overlay review-overlay';overlay.id='review-groupings';
+ const panel=document.createElement('div');panel.className='handoff-panel review-panel';
+ panel.innerHTML='<p class="label">REVIEW GROUPINGS</p><h3>Confirm Workstreams</h3><p class="brief">Folder groups are suggestions. Rename, merge folders that share an objective, or split sessions into a new Workstream. Keep provisional if you are not sure.</p>';
+ const list=document.createElement('div');list.className='review-list';
+ const colocations=window.TangledAttention?.colocate(realSessions)||[];
+ if(colocations.length){
+  const tip=document.createElement('p');tip.className='source';tip.textContent='Related sessions spotted across folders/harnesses: '+colocations.slice(0,3).map(c=>c.reason).join(' · ');panel.append(tip);
+ }
+ const checks=[];
+ for(const w of work){
+  const row=document.createElement('label');row.className='review-row';
+  const box=document.createElement('input');box.type='checkbox';box.value=w.id;checks.push(box);
+  const title=document.createElement('input');title.type='text';title.value=plainTitle(w.title);title.className='review-title';title.dataset.workId=w.id;
+  const meta=document.createElement('span');meta.className='source';meta.textContent=(w.provisional?'Provisional · ':'Curated · ')+(w.absentFromScan?'retained · not in current scan · ':'')+sessions.filter(s=>s.work===w.id).length+' sessions in window'+(w.attentionWhy?' · '+w.attentionWhy.slice(0,70):'');
+  row.append(box,title,meta);list.append(row);
+ }
+ panel.append(list);
+ const actions=document.createElement('div');actions.className='handoff-actions';
+ const renameApply=()=>{for(const input of panel.querySelectorAll('.review-title')){const w=work.find(x=>x.id===input.dataset.workId);if(w){w.title=escapeHTML(input.value.trim()||plainTitle(w.title));}}};
+ const merge=document.createElement('button');merge.textContent='Merge selected';
+ merge.onclick=()=>{
+  renameApply();
+  const ids=checks.filter(c=>c.checked).map(c=>c.value);
+  if(ids.length<2)return;
+  const primary=work.find(w=>w.id===ids[0]);
+  const rest=ids.slice(1);
+  for(const id of rest){
+   for(const s of sessions.filter(s=>s.work===id))s.work=primary.id;
+   primary.folderHints=[...new Set([...(primary.folderHints||[]),...(work.find(w=>w.id===id)?.folderHints||[])])];
+   const idx=work.findIndex(w=>w.id===id);if(idx>=0)work.splice(idx,1);
+  }
+  primary.provisional=false;primary.project='Curated workstream';
+  const rows=realSessions.filter(s=>sessions.some(x=>x.id===s.id&&x.work===primary.id));
+  enrichWorkstream(primary,rows);persistMemory();overlay.remove();openReviewGroupings(result);
+ };
+ const split=document.createElement('button');split.textContent='Split checked into new Workstream';
+ split.onclick=()=>{
+  renameApply();
+  const ids=checks.filter(c=>c.checked).map(c=>c.value);
+  if(ids.length!==1){alert('Check exactly one Workstream, then pick sessions to split from the prompt.');return;}
+  const source=work.find(w=>w.id===ids[0]);
+  const members=sessions.filter(s=>s.work===source.id);
+  if(members.length<2)return;
+  const pick=prompt('Enter session titles (or IDs) to split out, comma-separated.\n\n'+members.map(m=>m.title).join('\n'));
+  if(!pick)return;
+  const needles=pick.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean);
+  const moving=members.filter(m=>needles.some(n=>m.title.toLowerCase().includes(n)||m.id.toLowerCase().includes(n)));
+  if(!moving.length)return;
+  const id='ws-split-'+Date.now().toString(36);
+  const repo='repo-'+id;
+  const name=prompt('Name for the new Workstream',moving[0].title.slice(0,40))||moving[0].title.slice(0,40);
+  repositories[repo]={name,path:source.folderHints?.[0]||''};
+  const item={id,title:escapeHTML(name),project:'Curated workstream',state:'Paused',x:50,y:50,objective:'Split from '+plainTitle(source.title),brief:'',changes:[],next:'Confirm objective and next move.',sources:'Local files · curated',folderHints:[...(source.folderHints||[])],provisional:false,local:true};
+  work.push(item);for(const s of moving){s.work=id;s.repo=repo;}
+  const rows=realSessions.filter(s=>moving.some(m=>m.id===s.id));
+  enrichWorkstream(item,rows);enrichWorkstream(source,realSessions.filter(s=>sessions.some(x=>x.id===s.id&&x.work===source.id)));
+  placeWorkGrid();persistMemory();overlay.remove();openReviewGroupings(result);
+ };
+ const keep=document.createElement('button');keep.textContent='Keep provisional';
+ keep.onclick=async()=>{
+  renameApply();
+  curatedMemory.reviewedFolders=[...new Set([...(curatedMemory.reviewedFolders||[]),...realSessions.map(folderKey)])];
+  await persistMemory();overlay.remove();placeWorkGrid();render();
+ };
+ const confirm=document.createElement('button');confirm.className='primary';confirm.textContent='Confirm Workstreams';
+ confirm.onclick=async()=>{
+  renameApply();
+  for(const w of work){w.provisional=false;if(w.project==='Local folder group')w.project='Curated workstream';}
+  curatedMemory.reviewedFolders=[...new Set([...(curatedMemory.reviewedFolders||[]),...realSessions.map(folderKey)])];
+  placeWorkGrid();await persistMemory();overlay.remove();render();
+ };
+ actions.append(merge,split,keep,confirm);panel.append(actions);
+ const note=document.createElement('p');note.className='source';note.textContent='Membership persists in local curated memory and reattaches on re-import by session ID.';panel.append(note);
+ overlay.append(panel);document.body.append(overlay);
+}
+
+async function useLocalData(result){
+ realSessions=result.sessions;
+ work.splice(0);sessions.splice(0);sourceRecords.splice(0);links.splice(0);
+ for(const key of Object.keys(repositories))delete repositories[key];
+ for(const key of Object.keys(toolProjects))delete toolProjects[key];
+ let memory={version:1,workstreams:[],links:[],snapshots:{},dismissedLinks:[],reviewedFolders:[],lastImportSessionIds:[]};
+ if(window.tangled?.loadMemory){try{memory=await window.tangled.loadMemory();}catch{}}
+ curatedMemory=memory;
+ buildFromMemory(result,memory);
+ applyStoredLinks(memory);
+ placeWorkGrid();
  selected=work[0]?.id||'';expanded=null;
  if(!work.length)throw Error('No readable sessions found. Review the source report or explore sample data.');
- render();document.querySelector('.sample').textContent='LOCAL HISTORY · NOT LIVE STATUS';document.querySelector('.rail footer').textContent='Local import. Folder groups are provisional.';
- document.getElementById('signal').textContent=result.sessions.length+' imported sessions · '+work.length+' provisional folder groups';
+ const colocations=window.TangledAttention?.colocate(realSessions)||[];
+ // Soft-merge hint: if colocated sessions sit in different provisional workstreams, surface Needs you together in signal via attentionWhy already.
+ for(const group of colocations.filter(c=>c.kind==='branch')){
+  const memberSessions=sessions.filter(s=>group.sessionIds.includes(s.id));
+  const workIds=[...new Set(memberSessions.map(s=>s.work))];
+  if(workIds.length>1){
+   for(const id of workIds){
+    const w=work.find(x=>x.id===id);if(!w)continue;
+    w.attentionWhy=(w.attentionWhy?w.attentionWhy+' · ':'')+'Related across folders: '+group.reason;
+    if(!w.attentionOverride&&w.state==='Paused'){w.suggestedAttention=w.suggestedAttention||'Needs you';}
+   }
+  }
+ }
+ render();document.querySelector('.sample').textContent='LOCAL HISTORY · NOT LIVE STATUS';document.querySelector('.rail footer').textContent='Local import. Curated Workstreams persist; folders stay as evidence.';
+ const needs=work.filter(w=>w.state==='Needs you').length;
+ document.getElementById('signal').textContent=(needs?needs+' need you · ':'')+result.sessions.length+' imported sessions · '+work.length+' workstreams'+(work.some(w=>w.provisional)?' (some provisional)':'');
+ await persistMemory();
+ if(shouldPromptReview(result,memory))openReviewGroupings(result);
 }
+
+function bindGuidanceToBrief(workId,parsed,sessionIds){
+ const w=work.find(x=>x.id===workId);if(!w||!parsed)return;
+ w.snapshot={
+  standing:parsed.standing,
+  attention:parsed.attention,
+  attentionWhy:parsed.attentionWhy||parsed.attention,
+  attentionState:parsed.attentionState||null,
+  next:parsed.next,
+  nextSteps:parsed.nextSteps||[parsed.next],
+  sessionIds:sessionIds||[],
+  relatedSessionIds:parsed.relatedSessionIds||[],
+  generatedAt:new Date().toISOString(),
+  status:'pending'
+ };
+ // Surface in inspector immediately as Generated · not live; do not auto-apply Attention.
+ if(parsed.attentionState)w.suggestedAttention=parsed.attentionState;
+ if(parsed.attentionWhy||parsed.attention)w.attentionWhy=parsed.attentionWhy||parsed.attention;
+ if(parsed.nextSteps?.length){/* keep pending until Accept */}
+ // Co-locate related session IDs into this workstream suggestion note only (no auto-move).
+ if(parsed.relatedSessionIds?.length){
+  const orphans=parsed.relatedSessionIds.filter(id=>sessions.some(s=>s.id===id&&s.work!==workId));
+  if(orphans.length)w.attentionWhy=(w.attentionWhy||'')+' · AI also tied '+orphans.length+' related session(s) elsewhere — review groupings to merge';
+ }
+ persistMemory();render();
+}
+
+function applySuggestedRelationships(text){
+ const suggested=window.TangledAttention?.parseRelationships(text,work)||[];
+ let added=0;
+ for(const edge of suggested){
+  if((curatedMemory.dismissedLinks||[]).includes(linkKey(edge)))continue;
+  if(links.some(l=>linkKey(l)===linkKey(edge)))continue;
+  links.push({...edge,kind:'suggested',label:'Suggested'});
+  added++;
+ }
+ if(added)persistMemory();
+ return added;
+}
+
 const generate=document.createElement('button');generate.textContent='Generate guidance for selected workstream';generate.className='primary';
-const guidance=document.createElement('details');guidance.className='generated-guidance';guidance.open=true;
+const guidance=document.createElement('details');guidance.className='generated-guidance';guidance.open=false;
 const guidanceSummary=document.createElement('summary');guidanceSummary.textContent='Workstream guidance';guidance.append(guidanceSummary,generate);
 const guidanceText=document.createElement('p');guidanceText.style.whiteSpace='pre-wrap';guidance.append(guidanceText);document.querySelector('main').append(guidance);
 guidance.addEventListener('toggle',()=>requestAnimationFrame(fitMap));
 const generateAll=document.createElement('button');generateAll.textContent='Generate across all workstreams';generate.after(generateAll);
-const scopeNote=document.createElement('p');scopeNote.className='source';scopeNote.textContent='All-workstream guidance includes all imported sources, regardless of active filters. Selected context is sent to your configured engine.';generateAll.after(scopeNote);
-generateAll.onclick=async()=>{guidance.open=true;if(!window.tangled?.overview||!realSessions.length){guidanceText.textContent='Import local sessions in the desktop app first. Restart Electron if the overview adapter is unavailable.';return;}generateAll.disabled=true;generate.disabled=true;guidanceText.textContent='Connecting the dots across imported workstreams…';try{const result=await window.tangled.overview();guidanceText.replaceChildren();const title=document.createElement('strong');title.textContent='Across all workstreams · '+result.included+' of '+result.total+' sessions'+(result.limited?' · partial coverage':'');guidanceText.append(title);let brief;try{brief=JSON.parse(result.text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}catch{}if(brief&&['standing','attention','next'].every(k=>typeof brief[k]==='string')){for(const [key,label] of [['standing','Overall picture'],['relationships','Cross-workstream connections'],['attention','Needs your attention'],['next','Highest-value next move']]){if(typeof brief[key]!=='string')continue;const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent=label;const body=document.createElement('span');body.textContent=brief[key];row.append(heading,body);guidanceText.append(row);}}else{const row=document.createElement('span');row.className='guidance-row';row.textContent=result.text;guidanceText.append(row);}}catch(e){guidanceText.textContent=e.message;}finally{generateAll.disabled=false;generate.disabled=false;}};
-generate.onclick=async()=>{if(!window.tangled||!realSessions.length){guidanceText.textContent='Import local sessions in the Electron app first.';return;}const requestedWork=selected;generate.disabled=true;guidanceText.textContent='Reconstructing your next move…';try{const ids=sessions.filter(s=>s.work===requestedWork).slice(0,20).map(s=>s.id);const output=await window.tangled.guidance(ids);guidanceText.replaceChildren();let brief;try{brief=JSON.parse(output.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));}catch{}const title=document.createElement('strong');title.textContent='Brief for '+(repositories[sessions.find(s=>s.work===requestedWork)?.repo]?.name||'selected workstream');guidanceText.append(title);if(brief&&['standing','attention','next'].every(k=>typeof brief[k]==='string')){for(const [key,label] of [['standing','Where things stand'],['attention','Needs your attention'],['next','Next move']]){const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent=label;const body=document.createElement('span');body.textContent=brief[key];row.append(heading,body);guidanceText.append(row);}}else{const fallback=document.createElement('span');fallback.className='guidance-row';fallback.textContent=output;guidanceText.append(fallback);}}catch(e){guidanceText.textContent=e.message;}finally{generate.disabled=false;}};
-document.getElementById('setup-form').onsubmit=async event=>{event.preventDefault();if(!window.tangled){report.textContent='Local file access is available in the Electron app. Run npm start. The browser preview supports sample data only.';return;}const tools=[...document.querySelectorAll('input[name=harness]:checked')].map(n=>n.value);if(!tools.length){report.textContent='Choose at least one session source.';return;}const submit=event.submitter;submit.disabled=true;report.textContent='Reading selected local session histories…';try{await window.tangled.save({tools,provider:document.getElementById('provider').value,model:document.getElementById('ai-model').value,key:document.getElementById('api-key').value});document.getElementById('api-key').value='';const result=await window.tangled.scan(tools);report.textContent=result.reports.map(r=>r.tool+': '+r.status).join('\n');useLocalData(result);showWorkspace();}catch(e){report.textContent+='\n'+e.message;}finally{submit.disabled=false;}};
+const scopeNote=document.createElement('p');scopeNote.className='source';scopeNote.textContent='Guidance binds into the Switch Brief as a Context Snapshot (Accept / Edit / Discard). Overview relationships become Suggested edges — never auto-confirmed.';generateAll.after(scopeNote);
+const reviewBtn=document.createElement('button');reviewBtn.textContent='Review groupings';reviewBtn.onclick=()=>{if(!realSessions.length){guidanceText.textContent='Import local sessions first.';guidance.open=true;return;}openReviewGroupings({sessions:realSessions});};generateAll.after(reviewBtn);
+
+generateAll.onclick=async()=>{
+ guidance.open=true;
+ if(!window.tangled?.overview||!realSessions.length){guidanceText.textContent='Import local sessions in the desktop app first. Restart Electron if the overview adapter is unavailable.';return;}
+ generateAll.disabled=true;generate.disabled=true;guidanceText.textContent='Connecting the dots across imported workstreams…';
+ try{
+  const result=await window.tangled.overview();
+  guidanceText.replaceChildren();
+  const title=document.createElement('strong');title.textContent='Across all workstreams · '+result.included+' of '+result.total+' sessions'+(result.limited?' · partial coverage':'');guidanceText.append(title);
+  const brief=window.TangledAttention?.parseGuidance(result.text);
+  if(brief){
+   for(const [key,label] of [['standing','Overall picture'],['relationships','Cross-workstream connections'],['attention','Needs your attention'],['next','Highest-value next move']]){
+    const value=key==='relationships'?(typeof brief.raw?.relationships==='string'?brief.raw.relationships:JSON.stringify(brief.raw?.relationships||[],null,0)):brief[key];
+    if(typeof value!=='string'&&key!=='relationships')continue;
+    const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent=label;const body=document.createElement('span');body.textContent=typeof value==='string'?value:JSON.stringify(brief.raw?.relationships||[]);row.append(heading,body);guidanceText.append(row);
+   }
+   // Overview stays cross-cutting: relationships become Suggested edges; do not overwrite a Workstream Context Snapshot.
+   if(brief.attention){
+    const needy=work.filter(w=>w.state==='Needs you'||w.suggestedAttention==='Needs you');
+    for(const w of (needy.length?needy:work.slice(0,1))){
+     if(!w.attentionWhy||w.attentionWhy.includes('Imported'))w.attentionWhy=brief.attentionWhy||brief.attention;
+    }
+   }
+   const added=applySuggestedRelationships(result.text);
+   const note=document.createElement('span');note.className='guidance-row';note.textContent=added?('Added '+added+' Suggested constellation edge(s). Confirm or dismiss in the inspector.'):'No new grounded Suggested edges (endpoints must match known Workstreams).';guidanceText.append(note);
+  }else{
+   const row=document.createElement('span');row.className='guidance-row';row.textContent=result.text;guidanceText.append(row);
+   applySuggestedRelationships(result.text);
+  }
+  render();
+ }catch(e){guidanceText.textContent=e.message;}
+ finally{generateAll.disabled=false;generate.disabled=false;}
+};
+
+generate.onclick=async()=>{
+ if(!window.tangled||!realSessions.length){guidanceText.textContent='Import local sessions in the Electron app first.';guidance.open=true;return;}
+ const requestedWork=selected;generate.disabled=true;guidance.open=true;guidanceText.textContent='Reconstructing your next move…';
+ try{
+  const ids=sessions.filter(s=>s.work===requestedWork).slice(0,20).map(s=>s.id);
+  // Prefer evidence-rich sessions; include colocated relatives from other folders when titles/branches overlap.
+  const colocated=(window.TangledAttention?.colocate(realSessions)||[]).filter(g=>g.sessionIds.some(id=>ids.includes(id)));
+  const extra=colocated.flatMap(g=>g.sessionIds).filter(id=>!ids.includes(id)).slice(0,8);
+  const output=await window.tangled.guidance([...ids,...extra].slice(0,20));
+  guidanceText.replaceChildren();
+  const brief=window.TangledAttention?.parseGuidance(output);
+  const title=document.createElement('strong');title.textContent='Brief for '+(plainTitle(work.find(w=>w.id===requestedWork)?.title)||'selected workstream');guidanceText.append(title);
+  if(brief){
+   for(const [key,label] of [['standing','Where things stand'],['attention','Needs your attention'],['next','Next move']]){
+    const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent=label;const body=document.createElement('span');body.textContent=brief[key];row.append(heading,body);guidanceText.append(row);
+   }
+   if(brief.attentionWhy){const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent='Why';const body=document.createElement('span');body.textContent=brief.attentionWhy;row.append(heading,body);guidanceText.append(row);}
+   if(brief.nextSteps?.length){const row=document.createElement('span');row.className='guidance-row';const heading=document.createElement('b');heading.textContent='Clear next steps';const body=document.createElement('span');body.textContent=brief.nextSteps.join(' · ');row.append(heading,body);guidanceText.append(row);}
+   const bindNote=document.createElement('span');bindNote.className='guidance-row';bindNote.textContent='Bound into Switch Brief as Generated · not live. Accept, Edit, or Discard there — nothing applies until you accept.';guidanceText.append(bindNote);
+   bindGuidanceToBrief(requestedWork,brief,[...ids,...extra].slice(0,20));
+  }else{
+   const fallback=document.createElement('span');fallback.className='guidance-row';fallback.textContent=output;guidanceText.append(fallback);
+  }
+ }catch(e){guidanceText.textContent=e.message;}
+ finally{generate.disabled=false;}
+};
+
+document.getElementById('setup-form').onsubmit=async event=>{event.preventDefault();if(!window.tangled){report.textContent='Local file access is available in the Electron app. Run npm start. The browser preview supports sample data only.';return;}const tools=[...document.querySelectorAll('input[name=harness]:checked')].map(n=>n.value);if(!tools.length){report.textContent='Choose at least one session source.';return;}const submit=event.submitter;submit.disabled=true;report.textContent='Reading selected local session histories…';try{await window.tangled.save({tools,provider:document.getElementById('provider').value,model:document.getElementById('ai-model').value,key:document.getElementById('api-key').value});document.getElementById('api-key').value='';const result=await window.tangled.scan(tools);report.textContent=result.reports.map(r=>r.tool+': '+r.status).join('\n');await useLocalData(result);showWorkspace();}catch(e){report.textContent+='\n'+e.message;}finally{submit.disabled=false;}};
 showSetup();
-if(window.tangled)window.tangled.status().then(async config=>{document.getElementById('provider').value=config.provider;document.getElementById('ai-model').value=config.model;if(config.hasKey)document.getElementById('api-key').placeholder='Saved key retained unless replaced';if(config.configured){document.querySelectorAll('input[name=harness]').forEach(n=>n.checked=config.tools.includes(n.value));try{const result=await window.tangled.scan(config.tools);useLocalData(result);showWorkspace();}catch(e){report.textContent=e.message;}}}).catch(e=>{report.textContent=e.message;});
+if(window.tangled)window.tangled.status().then(async config=>{document.getElementById('provider').value=config.provider;document.getElementById('ai-model').value=config.model;if(config.hasKey)document.getElementById('api-key').placeholder='Saved key retained unless replaced';if(config.configured){document.querySelectorAll('input[name=harness]').forEach(n=>n.checked=config.tools.includes(n.value));try{const result=await window.tangled.scan(config.tools);await useLocalData(result);showWorkspace();}catch(e){report.textContent=e.message;}}}).catch(e=>{report.textContent=e.message;});
